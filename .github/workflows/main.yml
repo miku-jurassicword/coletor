@@ -18,11 +18,11 @@ jobs:
     - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install pycryptodome pywin32 psutil keyboard pyinstaller
+        pip install pycryptodome pywin32 pyinstaller
 
     - name: Compile EXE
       run: |
-        pyinstaller --onefile --noconsole --hidden-import win32crypt --hidden-import win32com --hidden-import pywintypes --collect-all win32crypt --collect-all pywin32 --hidden-import keyboard --collect-all keyboard --name Coletor coletor.py
+        pyinstaller --onefile --noconsole --hidden-import win32crypt --hidden-import win32com --name Coletor coletor.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
